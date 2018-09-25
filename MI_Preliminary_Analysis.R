@@ -10,10 +10,10 @@ library(reshape2)
 library(plyr)
 library(igraph)
 
-# The code file for generating analysis in the document "Summary_Aug15_2018"
+# The code file for generating analysis in the document "Summary_Sept1_2018"
 # for the Michigan data set
 # First Version: Sep 1st
-# This Version: Sep 1st
+# This Version: Sep 8th
 
 ## 1. Extract the network link
 
@@ -255,7 +255,13 @@ rownames(entry_matrix)<-agent
 colnames(entry_matrix)<-year
 write.csv(entry_matrix,"/Users/terrywu/Dropbox/MLS Network/Analysis Sept 1/active_agent_by_year.csv")
 
-# sales by active agent
+rm(list=ls())
+
+#  the average sale by active agents only
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
 
 # exclude sale2==0
 X<-X[X$sale2==1,]
@@ -266,27 +272,20 @@ sale_year<-X$close_year
 # form a dataset
 mydata<-data.frame(table(sale_year))
 
-# read active data
-setwd("/Users/terrywu/Dropbox/MLS Network/Analysis Sept 1")
-Y<-read.csv("active_agent_by_year.csv")
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
 
-# calculate the number of active agents by year
-active_num<-rep(NA, dim(Y)[2]-1)
-active_num[1:2]<-colSums(Y[,-1])[1:2]
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
 
-# a loop
-for(i in 4:dim(Y)[2])
-{
-  temp<-Y[Y[,i]==1,]  
-  temp<-temp[temp[,i-1]==1,]
-  active_num[i-1]<-dim(temp)[1]
-  print(i)
-}
+# calculate the average
+mydata$ave<-mydata$Freq/temp[,2]
 
-# average
-mydata$ave<-mydata$Freq/active_num
-
-# avg sales by year graph (average by all)
+# avg sales by year graph (average by active agents)
 ggplot(data=mydata, aes(x=sale_year, y=ave)) +
   geom_bar(stat="identity",fill="skyblue")+
   xlab("Year")+ylab("Average")+
@@ -356,65 +355,11 @@ mean(mydata$Freq)
 
 rm(list=ls())
 
-# sales by active agents
-
-# first a entry matrix
-
-# read the dataset
-X<-read.dta13("full_w_deeds_prepped_wc41.dta")
-
-# forced
-X<-X[X$sale2==1,]
-X<-X[X$forced_sale==1,]
-
-# identify when the agent enters
-
-# agent list
-agent<-c(X$lagent_id,X$bagent_id)
-agent<-unique(agent)
-agent<-agent[!(is.na(agent))]
-agent<-agent[agent!=""]
-
-# year span
-year<-c(X$close_year,X$list_year)
-year<-unique(year)
-year<-sort(year)
-
-# create a matrix to show whether the agent is showed up in a given year
-entry_matrix<-matrix(0, nrow = length(agent), ncol=length(year))
-
-# loop to identify whether the agent is active in a given year
-temp1<-data.frame(X$lagent_id, X$list_year)
-colnames(temp1)<-c("agent","year")
-temp1<-temp1[temp1$agent!="",]
-temp2<-data.frame(X$bagent_id, X$close_year)
-colnames(temp2)<-c("agent","year")
-temp2<-temp2[temp2$agent!="",]
-# aggregate 
-temp1<-rbind(temp1,temp2)
-temp1<-unique(temp1[1:2])
-# a loop long to matrix
-temp1<-temp1[order(temp1$year),]
-for(i in 2001:2014)
-{
-  temp<-temp1[temp1$year==i,]  
-  ID<-fmatch(temp$agent,agent)
-  entry_matrix[ID,i-2000]<-1
-  print(i)
-}
-
-# write out the matrix
-rownames(entry_matrix)<-agent
-colnames(entry_matrix)<-year
-
-# entry_matrix rename
-Y<-entry_matrix
-
-# the average sales
+#  the average sale by active agents only
 
 # set the working directory and read data
 setwd("/Users/terrywu/Dropbox/MLS Network")
-X<-read.dta13("full_w_deeds_prepped_wc41.dta")
+load("Michigan_Full.RData")
 
 # forced
 X<-X[X$forced_sale==1,]
@@ -428,28 +373,20 @@ sale_year<-X$close_year
 # form a dataset
 mydata<-data.frame(table(sale_year))
 
-# calculate the number of active agents by year
-active_num<-rep(NA, dim(Y)[2])
-active_num[1:2]<-colSums(Y[,])[1:2]
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
 
-# a loop
-for(i in 3:dim(Y)[2])
-{
-  temp<-Y[Y[,i]==1,]  
-  temp<-temp[temp[,i-1]==1,]
-  if(class(temp)=="numeric")
-  {
-    temp<-as.matrix(t(temp))
-  }
-  active_num[i]<-dim(temp)[1]
-  print(i)
-}
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
 
-# average
-mydata$ave<-mydata$Freq/active_num[-c(1,2)]
+# calculate the average
+mydata$ave<-mydata$Freq/temp[-c(1:2),2]
 
 # avg sales by year graph (average by active agents)
-mydata<-mydata[-1,]
 ggplot(data=mydata, aes(x=sale_year, y=ave)) +
   geom_bar(stat="identity",fill="skyblue")+
   xlab("Year")+ylab("Average")+
@@ -520,67 +457,13 @@ mean(mydata$Freq)
 
 rm(list=ls())
 
-# sales by active agents
-
-# first a entry matrix
-
-# read the dataset
-X<-read.dta13("full_w_deeds_prepped_wc41.dta")
-
-# non-forced
-X<-X[X$sale2==1,]
-X<-X[X$forced_sale!=1,]
-
-# identify when the agent enters
-
-# agent list
-agent<-c(X$lagent_id,X$bagent_id)
-agent<-unique(agent)
-agent<-agent[!(is.na(agent))]
-agent<-agent[agent!=""]
-
-# year span
-year<-c(X$close_year,X$list_year)
-year<-unique(year)
-year<-sort(year)
-
-# create a matrix to show whether the agent is showed up in a given year
-entry_matrix<-matrix(0, nrow = length(agent), ncol=length(year))
-
-# loop to identify whether the agent is active in a given year
-temp1<-data.frame(X$lagent_id, X$list_year)
-colnames(temp1)<-c("agent","year")
-temp1<-temp1[temp1$agent!="",]
-temp2<-data.frame(X$bagent_id, X$close_year)
-colnames(temp2)<-c("agent","year")
-temp2<-temp2[temp2$agent!="",]
-# aggregate 
-temp1<-rbind(temp1,temp2)
-temp1<-unique(temp1[1:2])
-# a loop long to matrix
-temp1<-temp1[order(temp1$year),]
-for(i in 2001:2015)
-{
-  temp<-temp1[temp1$year==i,]  
-  ID<-fmatch(temp$agent,agent)
-  entry_matrix[ID,i-2000]<-1
-  print(i)
-}
-
-# write out the matrix
-rownames(entry_matrix)<-agent
-colnames(entry_matrix)<-year
-
-# entry_matrix rename
-Y<-entry_matrix
-
-# the average sales
+#  the average sale by active agents only
 
 # set the working directory and read data
 setwd("/Users/terrywu/Dropbox/MLS Network")
-X<-read.dta13("full_w_deeds_prepped_wc41.dta")
+load("Michigan_Full.RData")
 
-# non-forced
+# non forced
 X<-X[X$forced_sale!=1,]
 
 # exclude sale2==0
@@ -592,28 +475,20 @@ sale_year<-X$close_year
 # form a dataset
 mydata<-data.frame(table(sale_year))
 
-# calculate the number of active agents by year
-active_num<-rep(NA, dim(Y)[2])
-active_num[1:2]<-colSums(Y[,])[1:2]
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
 
-# a loop
-for(i in 3:dim(Y)[2])
-{
-  temp<-Y[Y[,i]==1,]  
-  temp<-temp[temp[,i-1]==1,]
-  if(class(temp)=="numeric")
-  {
-    temp<-as.matrix(t(temp))
-  }
-  active_num[i]<-dim(temp)[1]
-  print(i)
-}
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
 
-# average
-mydata$ave<-mydata$Freq/active_num
+# calculate the average
+mydata$ave<-mydata$Freq/temp[,2]
 
 # avg sales by year graph (average by active agents)
-mydata<-mydata[-1,]
 ggplot(data=mydata, aes(x=sale_year, y=ave)) +
   geom_bar(stat="identity",fill="skyblue")+
   xlab("Year")+ylab("Average")+
