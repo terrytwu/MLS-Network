@@ -1,0 +1,1055 @@
+
+library(readstata13)
+library(ggplot2)
+library(fastmatch)
+library(xtable)
+library(Rfast)
+library(reshape2)
+library(igraph)
+
+# The code file for generating analysis in the document "Summary_Aug15_2018"
+# for the San Diego data set
+# First Version: Sep 1st
+# This Version: Sep 8st
+
+## 1. Extract the network link
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# extract the id of each agent (no duplication)
+agent<-c(X$bagent_id, X$lagent_id)
+agent<-unique(agent)
+
+# remove empty agent
+agent<-agent[agent!=""]
+
+# so the variable agent is the list of all agents (either buying or listing)
+# in order to construct a network, we are interested in whether
+# the property is sold or not, so we take a subset
+
+# subset
+Y<-data.frame(X$lagent_id, X$bagent_id, X$sale2)
+# change the var name
+colnames(Y)<-c("listing_agent","buying_agent","sale")
+# exclude sale2==0
+Y<-Y[which(Y$sale==1),]
+
+# write out the edge-list
+Z<-Y[,-3]
+write.csv(Z,"/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15/Edge_list.csv",row.names = F)  
+
+# another type of edge list
+Z<-aggregate(Y$sale~Y$listing_agent+Y$buying_agent, FUN=sum)
+# change var name
+colnames(Z)<-c("listing_agent","buying_agent","num_edge")
+
+# write out the edge-list
+write.csv(Z,"/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15/Edge_list_2.csv",row.names = F)  
+
+## 2. Construct a panel dataset
+
+# create a dataset in which the first column is agent id
+# the second column is agent name and the third column is office name
+agent_id_name<-data.frame(agent,rep(NA, length(agent)),rep(NA, length(agent)))
+for(i in 1:length(agent))
+{
+  temp<-X[X$lagent_id==agent[i],]
+  agent_id_name[i,2]<-temp$lagent_name[1]
+  agent_id_name[i,3]<-temp$lagent_office_name[1]
+  # if the office name is missing
+  # we try to find it as a bagent
+  if(is.na(agent_id_name[i,3]))
+  {
+    temp<-X[X$bagent_id==agent[i],]
+    agent_id_name[i,3]<-temp$bagent_office_name[1]
+  }
+  print(i)
+}
+colnames(agent_id_name)<-c("agent_id","agent_name","office_name")
+
+# in order to consturct a balanced dataset
+# we need to know the time span
+year<-c(X$list_year, X$close_year)
+year<-unique(year)
+year<-sort(year)
+
+# we need 6 variables
+
+# create a empty dataset
+mydata<-data.frame(t(rep(1,6)))
+colnames(mydata)<-c("agent_name","agent_id","num_closed_transaction","num_listed_transaction","year","office_name")
+mydata<-mydata[-1,]
+
+# loop for create a balanced panel dataset
+# for each year
+for(j in 1:length(year))
+{
+  temp<-matrix(NA, nrow=length(agent),ncol = 6)
+  temp<-as.data.frame(temp)
+  temp[,c(1,2,6)]<-agent_id_name
+  temp[,5]<-rep(year[j],length(agent))
+  # for each agent, we need a loop to extract info needed
+  for(i in 1:length(agent))
+  {
+    # num_closed_transaction
+    X_subset<-X[X$close_year==year[j],] 
+    X_subset<-X_subset[!is.na(X_subset$close_year),]
+    X_subset<-X_subset[X_subset$bagent_id==agent[i],]
+    temp[i,3]<-0
+    if(dim(X_subset)[1]>0)
+    {
+      temp[i,3]<-dim(X_subset)[1]
+    }
+    # num_listed_transaction
+    X_subset<-X[X$list_year==year[j],] 
+    X_subset<-X_subset[!is.na(X_subset$list_year),]
+    X_subset<-X_subset[X_subset$lagent_id==agent[i],]
+    temp[i,4]<-0
+    if(dim(X_subset)[1]>0)
+    {
+      temp[i,4]<-dim(X_subset)[1]
+    }
+    print(i)
+  }
+  # vertically combine
+  mydata<-rbind(mydata,temp)
+  print(j)
+}
+
+# save the dataset
+colnames(mydata)<-c("agent_id","agent_name","num_closed_transaction","num_listed_transaction","year","office_name")
+write.csv(mydata,"/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15/MLS_Panel.csv", row.names = F)
+
+## Then the analysis of the dataset
+
+rm(list=setdiff(ls(), "X"))
+
+## 3. Sales Analysis (Average)
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# sales by year graph
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Freq")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=0.01)
+
+# average
+mean(mydata$Freq)
+
+# then sales by agents
+# read dataset
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# agent list
+agent<-c(X$lagent_id,X$bagent_id)
+agent<-unique(agent)
+agent<-agent[agent!=""]
+
+# average sales of agents by year
+mydata$Freq<-mydata$Freq/length(agent)
+
+# avg sales by year graph (average by all)
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=50)
+
+# average
+mean(mydata$Freq)
+
+# create a matrix to record the entry by each agent
+
+# agent list
+agent<-c(X$lagent_id,X$bagent_id)
+agent<-unique(agent)
+agent<-agent[!(is.na(agent))]
+agent<-agent[agent!=""]
+
+# year span
+year<-c(X$close_year,X$list_year)
+year<-unique(year)
+year<-sort(year)
+
+# create a matrix to show whether the agent is showed up in a given year
+entry_matrix<-matrix(0, nrow = length(agent), ncol=length(year))
+
+# loop to identify whether the agent is active in a given year
+for(i in 1:length(agent))
+{
+  temp1<-X[X$bagent_id==agent[i],]
+  temp2<-X[X$lagent_id==agent[i],]
+  temp<-rbind(temp1, temp2)
+  temp_year<-c(temp$list_year,temp$close_year)
+  temp_year<-names(table(temp_year))
+  temp_year<-as.numeric(temp_year)
+  ID<-fmatch(temp_year, year)
+  entry_matrix[i, ID]<-1
+  print(i)
+}
+
+# write out the matrix
+rownames(entry_matrix)<-agent
+colnames(entry_matrix)<-year
+write.csv(entry_matrix,"/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15/active_agent_by_year.csv")
+
+# sales by active agent
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
+
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
+
+# calculate the average
+mydata$ave<-mydata$Freq/temp[,2]
+
+# plot
+ggplot(data=mydata, aes(x=sale_year, y=ave)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_fixed(ratio=6)
+
+## 4. Forced Sale Analysis
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# forced sales only
+X<-X[X$forced_sale==1,]
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, forced sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# sales by year graph
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Freq")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=0.01)
+
+# average
+mean(mydata$Freq)
+
+# then sales by agents
+
+# agent list
+agent<-c(X$lagent_id,X$bagent_id)
+agent<-unique(agent)
+
+# average sales of agents by year
+mydata$Freq<-mydata$Freq/length(agent)
+
+# avg sales by year graph (average by all)
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=10)
+
+# average
+mean(mydata$Freq)
+
+rm(list=ls())
+
+# the average sales by active agents only
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# forced
+X<-X[X$forced_sale==1,]
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
+
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
+
+# calculate the average
+mydata$ave<-mydata$Freq/temp[,2]
+
+# avg sales by year graph (average by all)
+ggplot(data=mydata, aes(x=sale_year, y=ave)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_fixed(ratio=3.5)
+
+rm(list=ls())
+
+## 5. Non-forced Sales Analysis
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# Non-forced sales only
+X<-X[X$forced_sale!=1,]
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# sales by year graph
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Freq")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=0.01)
+
+# average
+mean(mydata$Freq)
+
+# then sales by agents
+# read dataset
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# Non forced
+X<-X[X$forced_sale!=1,]
+
+# agent list
+agent<-c(X$lagent_id,X$bagent_id)
+agent<-unique(agent)
+
+# average sales of agents by year
+mydata$Freq<-mydata$Freq/length(agent)
+
+# avg sales by year graph (average by all)
+ggplot(data=mydata, aes(x=sale_year, y=Freq)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_hline(yintercept=mean(mydata$Freq), linetype="dashed", color = "coral",size=1.3)+
+  coord_fixed(ratio=50)
+
+# average
+mean(mydata$Freq)
+
+rm(list=ls())
+
+# read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# forced
+X<-X[X$forced_sale!=1,]
+
+# exclude sale2==0
+X<-X[X$sale2==1,]
+
+# first of all, sales by year
+sale_year<-X$close_year
+
+# form a dataset
+mydata<-data.frame(table(sale_year))
+
+# calculate active agents by year
+temp<-data.frame(X$lagent_id, X$list_year, X$bagent_id, X$close_year)
+temp<-data.frame(c(temp[,1],temp[,3]), c(temp[,2],temp[,4]))
+colnames(temp)<-c("agent","year")
+temp<-unique(temp[,1:2])
+
+# aggregate
+temp$num<-1
+temp<-aggregate(temp$num~temp$year,FUN=sum)
+
+# calculate the average
+mydata$ave<-mydata$Freq/temp[,2]
+
+# avg sales by year graph (average by all)
+ggplot(data=mydata, aes(x=sale_year, y=ave)) +
+  geom_bar(stat="identity",fill="skyblue")+
+  xlab("Year")+ylab("Average")+
+  theme_bw()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_fixed(ratio=3.5)
+
+rm(list=ls())
+
+## 6. Network Characteristics
+
+# read the dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.csv("Edge_list.csv")
+
+# degree
+# create a dataset with three columns
+# outdegree, indegree and degree
+# agent list
+agent<-c(X[,1],X[,2])
+agent<-unique(agent)
+
+# dataset
+mydata<-data.frame(agent,NA, NA, NA)
+colnames(mydata)<-c("Agent","Outdegree","Indegree","Degree")
+mydata[,2]<-0
+mydata[,3]<-0
+mydata[,4]<-0
+X$Num<-1
+# Outdegree
+temp<-aggregate(X$Num~X$listing_agent,FUN=sum)
+mydata[fmatch(temp[,1],mydata$Agent),2]<-temp[,2]
+# Indegree
+temp<-aggregate(X$Num~X$buying_agent,FUN=sum)
+mydata[fmatch(temp[,1],mydata$Agent),3]<-temp[,2]
+# Degree
+mydata[,4]<-mydata[,2]+mydata[,3]
+
+# degree distribution
+mydata1<-mydata[mydata$Outdegree<=20,]
+ggplot(mydata1, aes(x=Outdegree)) + 
+  geom_histogram(binwidth=1,color="black", fill="white")+
+  theme_bw()+
+  ylab("")+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  coord_fixed(ratio=0.005)
+
+mydata1<-mydata[mydata$Indegree<=20,]
+ggplot(mydata1, aes(x=Indegree)) + 
+  geom_histogram(binwidth=1,color="black", fill="white")+
+  theme_bw()+
+  ylab("")+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  coord_fixed(ratio=0.005)
+
+mydata1<-mydata[mydata$Degree<=20,]
+ggplot(mydata1, aes(x=Degree)) + 
+  geom_histogram(binwidth=1,color="black", fill="white")+
+  theme_bw()+
+  ylab("")+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  coord_fixed(ratio=0.005)
+
+# summary statistics of degrees
+sum_data<-data.frame(NA, NA, NA, NA, NA, NA)
+colnames(sum_data)<-names(summary(mydata$Outdegree))
+sum_data[1,]<-as.numeric(summary(mydata$Outdegree))
+sum_data<-rbind(sum_data,as.numeric(summary(mydata$Indegree)))
+sum_data<-rbind(sum_data,as.numeric(summary(mydata$Degree)))
+rownames(sum_data)<-c("Outdegree","Indegree","Degree")
+# write out
+xtable(sum_data,digits = 3)
+
+# turn the edge list to a network object to compute the cc
+X<-X[,-3]
+g<-graph.data.frame(X,directed=TRUE)
+coeff<-data.frame(as.vector(V(g)$name),transitivity(g,type="local"))
+# summary statistics of cc
+sum_data<-data.frame(NA, NA, NA, NA, NA, NA, NA)
+colnames(sum_data)<-names(summary(coeff$transitivity.g..type....local..))
+sum_data[1,]<-as.numeric(summary(coeff$transitivity.g..type....local..))
+# write out
+xtable(sum_data, digits = 3)
+
+# summary statistics of directed cc
+coeff<-data.frame(as.vector(V(g)$name),transitivity(g,type="barrat"))
+sum_data<-data.frame(NA, NA, NA, NA, NA, NA, NA)
+colnames(sum_data)<-names(summary(coeff$transitivity.g..type....barrat..))
+sum_data[1,]<-as.numeric(summary(coeff$transitivity.g..type....barrat..))
+# write out
+xtable(sum_data, digits = 3)
+
+# centrality
+closeness.cent <- closeness(g, mode="all")
+cent_data<-data.frame(NA, NA, NA, NA, NA, NA)
+colnames(cent_data)<-names(summary(closeness.cent))
+cent_data[1,]<-as.numeric(summary(closeness.cent))
+
+eigen.cent<-eigen_centrality(g, directed=T)
+cent_data<-rbind(cent_data,as.numeric(summary(eigen.cent$vector)))
+
+bet.cent<-betweenness(g, directed=T)
+cent_data<-rbind(cent_data,as.numeric(summary(bet.cent)))
+
+cent_data$name<-c("Closeness","Eigenvector","Betweenness")
+
+# write out
+xtable(cent_data,digits = 8)
+
+rm(list=ls())
+
+## 7. Entry-Exit Analysis
+
+# read the dataset
+setwd("/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15")
+X<-read.csv("active_agent_by_year.csv")
+
+# we would like to calculate entry and exit rate
+
+# year span
+year<-2001:2015
+
+# number of active agents in each year
+active_agent<-as.numeric(colSums (X[,-1], na.rm = FALSE, dims = 1))
+
+### Enter
+# for each year identify the number of agents
+# that are not active of the previous year
+# but active in the present year
+thereof1<-rep(0,length(year))
+for(i in 1:(length(year)-1))
+{
+  temp<-X[X[,i+2]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  thereof1[i+1]<-dim(temp)[1]
+}
+# for each year identify the number of agents
+# that are not active of the previous two years
+thereof2<-rep(0,length(year))
+for(i in 1:(length(year)-2))
+{
+  temp<-X[X[,i+3]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  thereof2[i+2]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the previous three years
+thereof3<-rep(0,length(year))
+for(i in 1:(length(year)-3))
+{
+  temp<-X[X[,i+4]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  thereof3[i+3]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the previous four years
+thereof4<-rep(0,length(year))
+for(i in 1:(length(year)-4))
+{
+  temp<-X[X[,i+5]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  temp<-temp[temp[,i+4]==0,]
+  thereof4[i+4]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the previous five years
+thereof5<-rep(0,length(year))
+for(i in 1:(length(year)-5))
+{
+  temp<-X[X[,i+6]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  temp<-temp[temp[,i+4]==0,]
+  temp<-temp[temp[,i+5]==0,]
+  thereof5[i+5]<-dim(temp)[1]
+}
+
+# form a dataset
+thereof1<-thereof1/active_agent
+thereof2<-thereof2/active_agent
+thereof3<-thereof3/active_agent
+thereof4<-thereof4/active_agent
+thereof5<-thereof5/active_agent
+# dataset
+mydata<-data.frame(rep(year,5),c(thereof1,thereof2,thereof3,thereof4,thereof5),c(rep("1 year",length(year)),rep("2 year",length(year)),rep("3 year",length(year)),rep("4 year",length(year)),rep("5 year",length(year))))
+colnames(mydata)<-c("Year","Percent","supp")
+# plot
+mydata<-mydata[mydata$Percent!=0,]
+ggplot(mydata, aes(x=Year, y=Percent, group=supp, color=supp)) +
+  geom_line(size=3)+
+  scale_color_brewer(palette="Paired")+
+  theme_minimal()+
+  theme_bw()+
+  ylab("Ratio")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom") +
+  scale_x_discrete(limits=c(2002:2014))+
+  theme(legend.title=element_blank())+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+### Exit
+# for each year identify the number of agents
+# that are not active of the next year
+# but active in the present year
+thereof1<-rep(0,length(year))
+for(i in 1:(length(year)-1))
+{
+  temp<-X[X[,i+1]==1,]
+  temp<-temp[temp[,i+2]==0,]
+  thereof1[i]<-dim(temp)[1]
+}
+# for each year identify the number of agents
+# that are not active of the next two years
+thereof2<-rep(0,length(year))
+for(i in 1:(length(year)-2))
+{
+  temp<-X[X[,i+1]==1,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  thereof2[i]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the next three years
+thereof3<-rep(0,length(year))
+for(i in 1:(length(year)-3))
+{
+  temp<-X[X[,i+1]==1,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  temp<-temp[temp[,i+4]==0,]
+  thereof3[i]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the next four years
+thereof4<-rep(0,length(year))
+for(i in 1:(length(year)-4))
+{
+  temp<-X[X[,i+1]==1,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  temp<-temp[temp[,i+4]==0,]
+  temp<-temp[temp[,i+5]==0,]
+  thereof4[i]<-dim(temp)[1]
+}
+
+# for each year identify the number of agents
+# that are not active of the next five years
+thereof5<-rep(0,length(year))
+for(i in 1:(length(year)-5))
+{
+  temp<-X[X[,i+1]==1,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i+3]==0,]
+  temp<-temp[temp[,i+4]==0,]
+  temp<-temp[temp[,i+5]==0,]
+  temp<-temp[temp[,i+6]==0,]
+  thereof5[i]<-dim(temp)[1]
+}
+
+# form a dataset
+thereof1<-thereof1/active_agent
+thereof2<-thereof2/active_agent
+thereof3<-thereof3/active_agent
+thereof4<-thereof4/active_agent
+thereof5<-thereof5/active_agent
+# dataset
+mydata<-data.frame(rep(year,5),c(thereof1,thereof2,thereof3,thereof4,thereof5),c(rep("1 year",length(year)),rep("2 year",length(year)),rep("3 year",length(year)),rep("4 year",length(year)),rep("5 year",length(year))))
+colnames(mydata)<-c("Year","Percent","supp")
+# plot
+mydata<-mydata[mydata$Percent!=0,]
+ggplot(mydata, aes(x=Year, y=Percent, group=supp, color=supp)) +
+  geom_line(size=3)+
+  scale_color_brewer(palette="Paired")+
+  theme_minimal()+
+  theme_bw()+
+  ylab("Ratio")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom") +
+  scale_x_discrete(limits=c(2001:2014))+
+  theme(legend.title=element_blank())+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+rm(list=ls())
+
+## 8. Superstar Analysis (Disappear and Transfer)
+
+# read the dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# construct a matrix
+# to record the number of transcations of each agent in each year
+
+# identify when the agent enters
+
+# agent list
+agent<-c(X$lagent_id,X$bagent_id)
+agent<-unique(agent)
+agent<-agent[!(is.na(agent))]
+agent<-agent[agent!=""]
+
+# year span
+year<-c(X$close_year,X$list_year)
+year<-unique(year)
+year<-sort(year)
+
+# create a matrix to record the number of transaction of each agent by year
+trans_matrix<-matrix(0, nrow = length(agent), ncol=length(year))
+
+# loop to identify the num of transcations in a given year
+for(i in 1:length(agent))
+{
+  temp1<-X[X$bagent_id==agent[i],]
+  temp2<-X[X$lagent_id==agent[i],]
+  # num of transcations and years
+  temp_trans1<-temp1$close_year
+  temp_trans2<-temp2$list_year
+  temp<-table(c(temp_trans1,temp_trans2))
+  temp_year<-as.numeric(names(temp))
+  temp_trans<-as.numeric(temp)
+  ID<-fmatch(temp_year, year)
+  trans_matrix[i, ID]<-temp_trans
+  print(i)
+}
+
+# write out the matrix
+rownames(trans_matrix)<-agent
+colnames(trans_matrix)<-year
+write.csv(trans_matrix,"/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15/transaction_of_agent_by_year.csv")
+
+# subset the matrix to include the agents who have 20 transcations in 
+# at least one of the years
+
+# the max transactions by an agent
+trans_max<-rowMaxs(trans_matrix, value = TRUE)
+trans_matrix<-trans_matrix[trans_max>=20,]
+
+# plot
+# reshape
+df<-melt(trans_matrix)  #the function melt reshapes it from wide to long
+df$rowid <- 1:7
+ggplot(df, aes(Var2, value, group=factor(rowid)))+ 
+  geom_line(aes(color=factor(rowid)),size=2.4)+
+  theme_bw()+
+  ylab("Num of Transactions")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(text = element_text(size=25))+
+  theme(legend.position="none") +
+  scale_x_discrete(limits=c(2001:2015))+
+  theme(legend.title=element_blank())+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# record the id of the agents with many transactions
+id_super<-row.names(trans_matrix)
+
+# extract the offices of these agents
+
+# define an address list
+office<-list()
+for(i in 1:length(id_super))
+{
+  # as a lagent
+  temp<-X[X$lagent_id==id_super[i],]  
+  year_temp<-names(trans_matrix[i,as.numeric(trans_matrix[i,])!=0])
+  year_temp<-as.numeric(year_temp)
+  temp<-temp[temp$list_year %in% year_temp,]
+  temp1<-temp$lagent_office_name
+  
+  # as a bagent
+  temp<-X[X$bagent_id==id_super[i],]  
+  year_temp<-names(trans_matrix[i,as.numeric(trans_matrix[i,])!=0])
+  year_temp<-as.numeric(year_temp)
+  temp<-temp[temp$close_year %in% year_temp,]
+  temp2<-temp$bagent_office_name
+  
+  # assign
+  office[[i]]<-names(table(c(temp1,temp2)))
+  
+  print(i)
+}
+
+# for the agents 6 and 7, they changed the office
+# as a lagent of agent 6
+temp<-X[X$lagent_id==id_super[6],]  
+year_temp<-names(trans_matrix[6,as.numeric(trans_matrix[6,])!=0])
+year_temp<-as.numeric(year_temp)
+temp<-temp[temp$list_year %in% year_temp,]
+temp1<-temp$lagent_office_name
+my1<-data.frame(temp1, temp$list_year)
+my1<-unique(my1[,1:2])
+my1<-my1[order(my1[,2]),]
+print(xtable(my1), include.rownames=FALSE)
+
+# as a lagent of agent 7
+temp<-X[X$lagent_id==id_super[7],]  
+year_temp<-names(trans_matrix[7,as.numeric(trans_matrix[7,])!=0])
+year_temp<-as.numeric(year_temp)
+temp<-temp[temp$list_year %in% year_temp,]
+temp1<-temp$lagent_office_name
+my2<-data.frame(temp1, temp$list_year)
+my2<-unique(my2[,1:2])
+my2<-my2[order(my2[,2]),]
+print(xtable(my2), include.rownames=FALSE)
+
+rm(list=ls())
+
+## 9. Partnership Analysis
+
+# Whether still work together the next year
+
+# read the dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+# subset the dataset
+X<-data.frame(X$lagent_id, X$bagent_id, X$list_year, X$close_year)
+colnames(X)<-c("lagent","bagent","list_year","close_year")
+X<-X[X$bagent!="",]
+X<-X[,-3]
+
+# so we have a dataset of partnership and year
+X<-unique(X)
+X$lagent<-as.character(X$lagent)
+X$bagent<-as.character(X$bagent)
+X<-X[X$lagent!=X$bagent,]
+
+# calculate the num of partners by year
+X$num<-1
+mydata<-aggregate(X$num~X$close_year, FUN=sum)
+colnames(mydata)<-c("Year","Num")
+
+# calculate the num of partners who work together in the next year
+part<-data.frame(mydata$Year[-14],NA)
+for(i in 1:13)
+{
+  # next year
+  temp1<-X[X$close_year==part[i+1,1],]
+  a<-as.character(temp1$lagent)
+  b<-as.character(temp1$bagent)
+  aa<-paste(a,b,sep=",")
+  
+  # this year
+  temp2<-X[X$close_year==part[i,1],] 
+  a<-as.character(temp2$lagent)
+  b<-as.character(temp2$bagent)
+  bb<-paste(a,b,sep=",")
+  part[i,2]<-as.numeric(table(aa %in% bb))[2]
+  
+  print(i)
+}
+# change NA to 0
+part[is.na(part[,2]),2]<-0
+mydata<-mydata[-14,]
+mydata[,2]<-part[,2]/mydata[,2]
+
+# plot
+ggplot(mydata,aes(Year, Num))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Ratio")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  coord_fixed(ratio=500)+
+  scale_x_discrete(limits=c(2001:2013))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+rm(list=ls())
+
+# Network Formation
+
+# read the dataset
+setwd("/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15")
+X<-read.csv("active_agent_by_year.csv")
+
+# year span
+year<-2001:2015
+
+# create a matrix to whether the agent enters by year
+# using the two-year threshold
+enter_matrix<-matrix(0, nrow=dim(X)[1], ncol=length(year))
+colnames(enter_matrix)<-year
+rownames(enter_matrix)<-X[,1]
+
+### Enter
+# for each year identify the enters
+# that are not active of the previous two years
+for(i in 1:(length(year)-2))
+{
+  temp<-X[X[,i+3]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  ID<-fmatch(temp[,1], X[,1])
+  enter_matrix[ID,i+2]<-1
+  print(i)
+}
+
+# read the transaction data
+Y<-read.csv("transaction_of_agent_by_year.csv")
+
+# calculate the number of the new enteries each year
+enter_agent<-as.numeric(colSums(enter_matrix,dims=1))
+
+# calculate the list of partners for each new agent
+
+# set the working directory and read data
+setwd("/Users/terrywu/Dropbox/MLS Network")
+X<-read.dta13("SD9191_market_full_w_deeds_prepped.dta")
+
+
+# create a vector to record the num of
+# agents who enter and work with star agents
+count<-rep(NA, length(enter_agent))
+
+# the superstars' IDs
+row.names(Y)<-Y[,1]
+Y<-Y[,-1]
+Y<-Y[row.names(Y)!="",]
+mnumer<-apply(Y,1,max,na.rm=TRUE)
+Y<-Y[mnumer>=20,]
+star_id<-row.names(Y)
+
+# for each year identify the enters
+# that are not active of the previous two years
+# and count whether they work with super stats
+
+# read data
+M<-data.frame(X$lagent_id, X$bagent_id, X$close_year)
+M<-M[M[,2]!="",]
+M[,1]<-as.character(M[,1])
+M[,2]<-as.character(M[,2])
+M<-M[M[,1]!=M[,2],]
+
+# so M is the partnership dataset
+
+setwd("/Users/terrywu/Dropbox/MLS Network/Analysis Aug 15")
+X<-read.csv("active_agent_by_year.csv")
+
+# for each year, we identify the number of partnerships with superstars
+for(i in 1:(length(year)-2))
+{
+  temp<-X[X[,i+3]==1,]
+  temp<-temp[temp[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp_id<-temp[,1]
+  temp_id<-as.character(temp_id)
+  # a subset to record the partership in a given year
+  temp<-M[M[,3]==i+2002,]
+  temp1<-temp[temp[,1] %in% temp_id,]
+  temp2<-temp[temp[,2] %in% temp_id,]
+  # filp temp2
+  temp2<-data.frame(temp2[,2],temp2[,1],temp2[,3])
+  colnames(temp1)<-c("ID1","ID2","Y")
+  colnames(temp2)<-c("ID1","ID2","Y")
+  temp<-rbind(temp1, temp2)
+  temp<-temp[,-3]
+  temp<-unique(temp[,1:2])
+  # count the agents who work with superstar when they enter
+  temp<-temp[temp[,2] %in% star_id,]
+  count[i+2]<-length(unique(temp[,1]))
+}
+
+# the ratio
+ratio<-count[-c(1,2)]/enter_agent[-c(1,2)]
+# plot
+myd<-data.frame(ratio[-13],2003:2014)
+colnames(myd)<-c("ratio","year")
+
+# plot
+ggplot(myd,aes(year, ratio))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Ratio")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))+
+  theme(text = element_text(size=20))+
+  scale_x_discrete(limits=c(2003:2014))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
