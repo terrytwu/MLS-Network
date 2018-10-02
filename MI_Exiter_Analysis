@@ -1,0 +1,329 @@
+
+library(readstata13)
+library(ggplot2)
+library(fastmatch)
+library(xtable)
+library(Rfast)
+library(matrixStats)
+library(sqldf)
+library(reshape2)
+library(plyr)
+library(igraph)
+
+# The code file for generating exiter analysis for the MI dataset
+# First Version: Oct 1st
+# This Version: Oct 2nd
+
+# set the working directory and read dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# we first calculate the transactions per agent-year
+
+# year span
+year<-c(X$list_year, X$close_year)
+year<-unique(year)
+year<-year[!is.na(year)]
+year<-year[order(year)]
+
+# create a data frame such that the first column is agent id
+# the second column is year
+# the third column is num of transactions
+trans<-data.frame(NA, NA, NA)
+colnames(trans)<-c("Agent_ID","Year","Num_Transactions")
+
+# add a number for calculating
+X$Num<-1
+
+# loop through years
+for(i in 1:length(year))
+{
+# as a listing agent
+temp1<-X[X$list_year==year[i],]
+temp1<-temp1[!is.na(temp1$lagent_id),]
+temp1<-temp1[temp1$lagent_id!="",]
+# excluding self-trans
+temp1<-temp1[temp1$lagent_id!=temp1$bagent_id,]
+if(dim(temp1)[1]!=0)
+{
+A<-aggregate(temp1$Num~temp1$lagent_id+temp1$list_year, FUN=sum)
+}
+if(dim(temp1)[1]==0)
+{
+A<-data.frame(NA, NA, NA)
+}
+colnames(A)<-c("Agent_ID","Year","Num_Transactions")
+  
+# as a buying agent
+temp1<-X[X$close_year==year[i],]
+temp1<-temp1[!is.na(temp1$bagent_id),]
+temp1<-temp1[temp1$bagent_id!="",]
+# excluding self-trans
+temp1<-temp1[temp1$lagent_id!=temp1$bagent_id,]
+if(dim(temp1)[1]!=0)
+{
+B<-aggregate(temp1$Num~temp1$bagent_id+temp1$close_year, FUN=sum)
+}
+if(dim(temp1)[1]==0)
+{
+B<-data.frame(NA, NA, NA)
+}
+colnames(B)<-c("Agent_ID","Year","Num_Transactions")
+
+# merge A and B
+AB<-rbind(A,B)
+# aggregate 
+AB<-aggregate(AB$Num_Transactions~AB$Agent_ID+AB$Year, FUN=sum)
+colnames(AB)<-c("Agent_ID","Year","Num_Transactions")
+
+# calculate the self-transactions in that year
+temp1<-X[X$list_year==year[i],]
+temp1<-temp1[temp1$close_year==year[i],]
+temp1<-temp1[temp1$lagent_id==temp1$bagent_id,]
+temp1<-temp1[temp1$lagent_id!="",]
+if(dim(temp1)[1]!=0)
+{
+C<-aggregate(temp1$Num~temp1$lagent_id+temp1$list_year, FUN=sum)
+colnames(C)<-c("Agent_ID","Year","Num_Transactions")
+}
+
+# combine
+AB<-rbind(AB, C)
+# aggregate 
+AB<-aggregate(AB$Num_Transactions~AB$Agent_ID+AB$Year, FUN=sum)
+colnames(AB)<-c("Agent_ID","Year","Num_Transactions")
+
+# into the main dataset
+trans<-rbind(trans, AB)
+
+# print the process
+print(year[i])
+}
+
+# clean trans data frame
+trans<-trans[!is.na(trans$Agent_ID),]
+
+# save this dataset
+write.csv(trans,"/Users/terrywu/Dropbox/MLS Network/Superstar Task/Transaction_by_Agent_Year.csv",row.names = F)
+
+
+# STARTING FROM HERE WE DON'T HAVE TO EXTRACT THE TRANS DATA, WE CAN JUST READ THEM
+
+# read transaction data
+setwd("/Users/terrywu/Dropbox/MLS Network/Superstar Task")
+trans<-read.csv("Transaction_by_Agent_Year.csv",stringsAsFactors = F)
+
+# calculate active dataset based on trans
+active<-acast(trans, Agent_ID~Year, value.var="Num_Transactions",fun.aggregate=sum)
+active[is.na(active)]<-0
+
+# year span
+year<-unique(trans$Year)
+year<-year[order(year)]
+
+# using 2-year def to create a list of exiting agents
+exit<-list()
+for(i in 1:(length(year)-2))
+{
+temp<-active[active[,i+1]==0,]
+temp<-temp[temp[,i+2]==0,]
+temp<-temp[temp[,i]!=0,]
+exit[[i]]<-rownames(temp)
+print(i)
+}
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# read the original dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# for each year, we first compute the agents who connect to exiters
+connect_agent<-list()
+# loop through
+for(i in 1:length(exit))
+{
+# for exiters acting as listers
+temp1<-X[X$close_year==year[i],] 
+temp1<-temp1[temp1$lagent_id %in% exit[[i]],]
+# take the bagent out
+b<-temp1$bagent_id
+
+# for exiters acting as buyers
+temp1<-X[X$list_year==year[i],] 
+temp1<-temp1[temp1$bagent_id %in% exit[[i]],]
+# take the lagent out
+b<-c(b,temp1$lagent_id)
+
+# include only unique agent
+b<-b[b!=""]
+b<-unique(b)
+
+# also we excude the exiters themselves
+b<-b[!(b %in% exit[[i]])]
+connect_agent[[i]]<-b
+
+# print the process
+print(i)
+}
+
+# for each year, calculate the agents who do not connect to exiters
+notconnect_agent<-list()
+# loop through year
+for(i in 1:length(exit))
+{
+# extracting all agents
+A<-active[active[,i]>=1,]
+A<-row.names(A)
+A<-unique(A)
+# calculating the agents who do not connect
+B<-setdiff(A, connect_agent[[i]])
+
+# exclude the exiters
+B<-B[!(B %in% exit[[i]])]
+
+# save
+notconnect_agent[[i]]<-B
+# print the process
+print(i)
+}
+
+# by the above process, I have a connect list and a disconnect list
+
+# the transaction mean of connected and disconnect agents by year
+mean_trans_connect<-rep(NA, length(connect_agent))
+mean_trans_noconnect<-rep(NA, length(notconnect_agent))
+# loop through year
+for(i in 1:length(connect_agent))
+{
+# connected trans
+temp1<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Num_Transactions)
+mean_trans_connect[i]<-temp1
+
+# disconnected trans
+temp1<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Num_Transactions)
+mean_trans_noconnect[i]<-temp1
+
+# print the progress
+print(i)
+}
+
+# create a dataset to save those mean trasactions
+mydf<-data.frame(c(mean_trans_connect, mean_trans_noconnect), rep(year[1:length(mean_trans_connect)],2))
+colnames(mydf)<-c("Means","Year")
+mydf$Group<-c(rep("Connected Agents",13),rep("Disconnected Agents",13))
+# exclude 2013
+mydf<-mydf[mydf$Year!=2013,]
+
+# plot
+ggplot(mydf, aes(x=Year,y=Means,group=Group,color=Group))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Difference in Mean Transactions")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(2001:2012))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+# probability of sales
+# we calculate the probability of sale for each agent for each year
+prob_sale<-data.frame(NA, NA, NA)
+colnames(prob_sale)<-c("Agent_ID","Year","Prob")
+
+# a loop through to calculate that
+for(i in 1:13)
+{
+# list in that year
+temp1<-X[X$list_year==year[i],]
+# if close price is non-missing, then it was sold
+temp1<-data.frame(temp1$lagent_id, temp1$close_price)
+# for non-missing price, assign 1 and 0 o.w.
+temp1$temp1.close_price[!is.na(temp1$temp1.close_price)]<-1
+temp1$temp1.close_price[is.na(temp1$temp1.close_price)]<-0
+# the probs
+temp1<-aggregate(temp1$temp1.close_price~temp1$temp1.lagent_id, FUN=mean)
+colnames(temp1)<-c("Agent_ID","Prob")
+temp1$Year<-year[i]
+# merge
+prob_sale<-rbind(prob_sale, temp1)
+# print the progress
+print(i)
+}
+
+# remove the first obs
+prob_sale<-prob_sale[-1,]
+
+# the prob mean of connected and disconnect agents by year
+p_trans_connect<-rep(NA, length(connect_agent))
+p_trans_noconnect<-rep(NA, length(notconnect_agent))
+# loop through year
+for(i in 1:length(connect_agent))
+{
+# connected probs
+temp1<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Prob)
+p_trans_connect[i]<-temp1
+  
+# disconnected probs
+temp1<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Prob)
+p_trans_noconnect[i]<-temp1
+  
+# print the progress
+print(i)
+}
+
+
+# create a dataset to save those mean probs
+mydf<-data.frame(c(p_trans_connect, p_trans_noconnect), rep(year[1:length(p_trans_connect)],2))
+colnames(mydf)<-c("Means","Year")
+mydf$Group<-c(rep("Connected Agents",13),rep("Disconnected Agents",13))
+# exclude 2013
+mydf<-mydf[mydf$Year!=2013,]
+
+# plot
+ggplot(mydf, aes(x=Year,y=Means,group=Group,color=Group))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Difference in Mean Prob of Sales")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(2001:2012))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
