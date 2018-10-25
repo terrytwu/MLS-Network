@@ -1,0 +1,2246 @@
+
+library(readstata13)
+library(ggplot2)
+library(fastmatch)
+library(xtable)
+library(Rfast)
+library(matrixStats)
+library(sqldf)
+library(reshape2)
+library(plyr)
+library(igraph)
+
+# The code file for generating exiter analysis for the MI dataset
+# First Version: Oct 1st
+# This Version: Oct 3rd
+
+# set the working directory and read dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# we first calculate the transactions per agent-year
+
+# year span
+year<-c(X$list_year, X$close_year)
+year<-unique(year)
+year<-year[!is.na(year)]
+year<-year[order(year)]
+
+# create a data frame such that the first column is agent id
+# the second column is year
+# the third column is num of transactions
+trans<-data.frame(NA, NA, NA)
+colnames(trans)<-c("Agent_ID","Year","Num_Transactions")
+
+# add a number for calculating
+X$Num<-1
+
+# loop through years
+for(i in 1:length(year))
+{
+# as a listing agent
+temp1<-X[X$list_year==year[i],]
+temp1<-temp1[!is.na(temp1$lagent_id),]
+temp1<-temp1[temp1$lagent_id!="",]
+# excluding self-trans
+temp1<-temp1[temp1$lagent_id!=temp1$bagent_id,]
+if(dim(temp1)[1]!=0)
+{
+A<-aggregate(temp1$Num~temp1$lagent_id+temp1$list_year, FUN=sum)
+}
+if(dim(temp1)[1]==0)
+{
+A<-data.frame(NA, NA, NA)
+}
+colnames(A)<-c("Agent_ID","Year","Num_Transactions")
+  
+# as a buying agent
+temp1<-X[X$close_year==year[i],]
+temp1<-temp1[!is.na(temp1$bagent_id),]
+temp1<-temp1[temp1$bagent_id!="",]
+# excluding self-trans
+temp1<-temp1[temp1$lagent_id!=temp1$bagent_id,]
+if(dim(temp1)[1]!=0)
+{
+B<-aggregate(temp1$Num~temp1$bagent_id+temp1$close_year, FUN=sum)
+}
+if(dim(temp1)[1]==0)
+{
+B<-data.frame(NA, NA, NA)
+}
+colnames(B)<-c("Agent_ID","Year","Num_Transactions")
+
+# merge A and B
+AB<-rbind(A,B)
+# aggregate 
+AB<-aggregate(AB$Num_Transactions~AB$Agent_ID+AB$Year, FUN=sum)
+colnames(AB)<-c("Agent_ID","Year","Num_Transactions")
+
+# calculate the self-transactions in that year
+temp1<-X[X$list_year==year[i],]
+temp1<-temp1[temp1$close_year==year[i],]
+temp1<-temp1[temp1$lagent_id==temp1$bagent_id,]
+temp1<-temp1[temp1$lagent_id!="",]
+if(dim(temp1)[1]!=0)
+{
+C<-aggregate(temp1$Num~temp1$lagent_id+temp1$list_year, FUN=sum)
+colnames(C)<-c("Agent_ID","Year","Num_Transactions")
+}
+
+# combine
+AB<-rbind(AB, C)
+# aggregate 
+AB<-aggregate(AB$Num_Transactions~AB$Agent_ID+AB$Year, FUN=sum)
+colnames(AB)<-c("Agent_ID","Year","Num_Transactions")
+
+# into the main dataset
+trans<-rbind(trans, AB)
+
+# print the process
+print(year[i])
+}
+
+# clean trans data frame
+trans<-trans[!is.na(trans$Agent_ID),]
+
+# save this dataset
+write.csv(trans,"/Users/terrywu/Dropbox/MLS Network/Superstar Task/Transaction_by_Agent_Year.csv",row.names = F)
+
+
+# STARTING FROM HERE WE DON'T HAVE TO EXTRACT THE TRANS DATA, WE CAN JUST READ THEM
+
+# read transaction data
+setwd("/Users/terrywu/Dropbox/MLS Network/Superstar Task")
+trans<-read.csv("Transaction_by_Agent_Year.csv",stringsAsFactors = F)
+
+# calculate active dataset based on trans
+active<-acast(trans, Agent_ID~Year, value.var="Num_Transactions",fun.aggregate=sum)
+active[is.na(active)]<-0
+
+# year span
+year<-unique(trans$Year)
+year<-year[order(year)]
+
+# using 2-year def to create a list of exiting agents
+exit<-list()
+for(i in 1:(length(year)-2))
+{
+temp<-active[active[,i+1]==0,]
+temp<-temp[temp[,i+2]==0,]
+temp<-temp[temp[,i]!=0,]
+exit[[i]]<-rownames(temp)
+print(i)
+}
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# read the original dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# for each year, we first compute the agents who connect to exiters
+connect_agent<-list()
+# loop through
+for(i in 1:length(exit))
+{
+# for exiters acting as listers
+temp1<-X[X$close_year==year[i],] 
+temp1<-temp1[temp1$lagent_id %in% exit[[i]],]
+# take the bagent out
+b<-temp1$bagent_id
+
+# for exiters acting as buyers
+temp1<-X[X$list_year==year[i],] 
+temp1<-temp1[temp1$bagent_id %in% exit[[i]],]
+# take the lagent out
+b<-c(b,temp1$lagent_id)
+
+# include only unique agent
+b<-b[b!=""]
+b<-unique(b)
+
+# also we excude the exiters themselves
+b<-b[!(b %in% exit[[i]])]
+connect_agent[[i]]<-b
+
+# print the process
+print(i)
+}
+
+# for each year, calculate the agents who do not connect to exiters
+notconnect_agent<-list()
+# loop through year
+for(i in 1:length(exit))
+{
+# extracting all agents
+A<-active[active[,i]>=1,]
+A<-row.names(A)
+A<-unique(A)
+# calculating the agents who do not connect
+B<-setdiff(A, connect_agent[[i]])
+
+# exclude the exiters
+B<-B[!(B %in% exit[[i]])]
+
+# save
+notconnect_agent[[i]]<-B
+# print the process
+print(i)
+}
+
+# by the above process, I have a connect list and a disconnect list
+
+# the transaction mean of connected and disconnect agents by year
+mean_trans_connect<-rep(NA, length(connect_agent))
+mean_trans_noconnect<-rep(NA, length(notconnect_agent))
+# loop through year
+for(i in 1:length(connect_agent))
+{
+# connected trans
+temp1<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Num_Transactions)
+mean_trans_connect[i]<-temp1
+
+# disconnected trans
+temp1<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Num_Transactions)
+mean_trans_noconnect[i]<-temp1
+
+# print the progress
+print(i)
+}
+
+# create a dataset to save those mean trasactions
+mydf<-data.frame(c(mean_trans_connect, mean_trans_noconnect), rep(year[1:length(mean_trans_connect)],2))
+colnames(mydf)<-c("Means","Year")
+mydf$Group<-c(rep("Connected Agents",13),rep("Disconnected Agents",13))
+# exclude 2013
+mydf<-mydf[mydf$Year!=2013,]
+
+# plot
+ggplot(mydf, aes(x=Year,y=Means,group=Group,color=Group))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Difference in Mean Transactions")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(2001:2012))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+# probability of sales
+# we calculate the probability of sale for each agent for each year
+prob_sale<-data.frame(NA, NA, NA)
+colnames(prob_sale)<-c("Agent_ID","Year","Prob")
+
+# a loop through to calculate that
+for(i in 1:13)
+{
+# list in that year
+temp1<-X[X$list_year==year[i],]
+# if close price is non-missing, then it was sold
+temp1<-data.frame(temp1$lagent_id, temp1$close_price)
+# for non-missing price, assign 1 and 0 o.w.
+temp1$temp1.close_price[!is.na(temp1$temp1.close_price)]<-1
+temp1$temp1.close_price[is.na(temp1$temp1.close_price)]<-0
+# the probs
+temp1<-aggregate(temp1$temp1.close_price~temp1$temp1.lagent_id, FUN=mean)
+colnames(temp1)<-c("Agent_ID","Prob")
+temp1$Year<-year[i]
+# merge
+prob_sale<-rbind(prob_sale, temp1)
+# print the progress
+print(i)
+}
+
+# remove the first obs
+prob_sale<-prob_sale[-1,]
+
+# the prob mean of connected and disconnect agents by year
+p_trans_connect<-rep(NA, length(connect_agent))
+p_trans_noconnect<-rep(NA, length(notconnect_agent))
+# loop through year
+for(i in 1:length(connect_agent))
+{
+# connected probs
+temp1<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Prob)
+p_trans_connect[i]<-temp1
+  
+# disconnected probs
+temp1<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+temp1<-temp1[temp1$Year==year[i],]
+# mean
+temp1<-mean(temp1$Prob)
+p_trans_noconnect[i]<-temp1
+  
+# print the progress
+print(i)
+}
+
+
+# create a dataset to save those mean probs
+mydf<-data.frame(c(p_trans_connect, p_trans_noconnect), rep(year[1:length(p_trans_connect)],2))
+colnames(mydf)<-c("Means","Year")
+mydf$Group<-c(rep("Connected Agents",13),rep("Disconnected Agents",13))
+# exclude 2013
+mydf<-mydf[mydf$Year!=2013,]
+
+# plot
+ggplot(mydf, aes(x=Year,y=Means,group=Group,color=Group))+
+  geom_line(size=3)+
+  theme_bw()+
+  ylab("Difference in Mean Prob of Sales")+
+  xlab("Year")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(2001:2012))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+
+##### Updated on Oct 3rd
+##### draw for before exit and after exit
+##### we have the transaction data, connected group and disconnected group in each year
+
+# for each year, I create the mean transactions for before exit and after exit
+
+# the year span
+year<-2001:2013
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+# for connected group at that year
+temp1<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+# the mean by year
+temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+colnames(temp1)<-c("year","avg")
+temp1<-temp1[temp1$year<=2013,]
+# add to matrix
+id_mat<-fmatch(temp1$year, year)
+connect_trans_mat[i,id_mat]<-temp1$avg
+
+# similarly for disconnected agents
+temp1<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+# the mean by year
+temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+colnames(temp1)<-c("year","avg")
+temp1<-temp1[temp1$year<=2013,]
+# add to matrix
+id_mat<-fmatch(temp1$year, year)
+disconnect_trans_mat[i,id_mat]<-temp1$avg
+
+# print the progress
+print(i)
+}
+
+# draw for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts (Connected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Trans (Connected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# draw for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts (Disconnected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Trans (DisConnected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+
+# draw for two group difference
+mydf<-data.frame(as.vector(t(connect_trans_mat)-t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts (Connected-Disconnected)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Trans (Connected-Disconnected)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+
+# for each year, I create the mean prob for before exit and after exit
+
+# the year span
+year<-2001:2013
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+  # for connected group at that year
+  temp1<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  connect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # similarly for disconnected agents
+  temp1<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  disconnect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # print the progress
+  print(i)
+}
+
+# draw for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales (Connected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob (Connected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+
+# draw for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales (Disconnected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob (Disconnected Group)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+# draw for two group difference
+mydf<-data.frame(as.vector(t(connect_trans_mat)-t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# plot
+ggplot(mydf, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales (Connected-Disconnected)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+M$Group<-"Average"
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob (Connected-Disconnected)")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-12:12))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))
+
+
+
+
+##### Updated on Oct 3rd
+##### draw for before exit and after exit
+##### we have the transaction data, connected group and disconnected group in each year
+
+
+# for each year, I create the mean transactions for before exit and after exit
+
+# the year span
+year<-2001:2013
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+  # for connected group at that year
+  temp1<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  connect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # similarly for disconnected agents
+  temp1<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  disconnect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # print the progress
+  print(i)
+}
+
+# for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+# add a group name
+M$Group<-"Connected Group"
+
+# for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M1<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M1)<-c("Event","Mean")
+# add a group name
+M1$Group<-"Disconnected Group"
+
+# combine two
+M<-rbind(M, M1)
+# restrict to -3 to 3
+M<-M[M$Event %in% c(-3:3),]
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0, 50))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+# similarly for probs
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+  # for connected group at that year
+  temp1<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  connect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # similarly for disconnected agents
+  temp1<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  disconnect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # print the progress
+  print(i)
+}
+
+
+# for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+# add a group name
+M$Group<-"Connected Group"
+
+# for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M1<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M1)<-c("Event","Mean")
+# add a group name
+M1$Group<-"Disconnected Group"
+
+# combine two
+M<-rbind(M, M1)
+# restrict to -3 to 3
+M<-M[M$Event %in% c(-3:3),]
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0.35, 0.5))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+
+
+
+
+############## Added on Oct 5
+############## Control group to match treatment group also in num of transactions
+
+
+# read transaction data
+setwd("/Users/terrywu/Dropbox/MLS Network/Superstar Task")
+trans<-read.csv("Transaction_by_Agent_Year.csv",stringsAsFactors = F)
+
+# calculate active dataset based on trans
+active<-acast(trans, Agent_ID~Year, value.var="Num_Transactions",fun.aggregate=sum)
+active[is.na(active)]<-0
+
+# year span
+year<-unique(trans$Year)
+year<-year[order(year)]
+
+# using 2-year def to create a list of exiting agents
+exit<-list()
+for(i in 1:(length(year)-2))
+{
+  temp<-active[active[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i]!=0,]
+  exit[[i]]<-rownames(temp)
+  print(i)
+}
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# read the original dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# for each year, we first compute the agents who connect to exiters
+connect_agent<-list()
+# loop through
+for(i in 1:length(exit))
+{
+  # for exiters acting as listers
+  temp1<-X[X$close_year==year[i],] 
+  temp1<-temp1[temp1$lagent_id %in% exit[[i]],]
+  # take the bagent out
+  b<-temp1$bagent_id
+  
+  # for exiters acting as buyers
+  temp1<-X[X$list_year==year[i],] 
+  temp1<-temp1[temp1$bagent_id %in% exit[[i]],]
+  # take the lagent out
+  b<-c(b,temp1$lagent_id)
+  
+  # include only unique agent
+  b<-b[b!=""]
+  b<-unique(b)
+  
+  # also we excude the exiters themselves
+  b<-b[!(b %in% exit[[i]])]
+  connect_agent[[i]]<-b
+  
+  # print the process
+  print(i)
+}
+
+# for each year, calculate the agents who do not connect to exiters
+notconnect_agent<-list()
+# loop through year
+for(i in 1:length(exit))
+{
+  # extracting all agents
+  A<-active[active[,i]>=1,]
+  A<-row.names(A)
+  A<-unique(A)
+  # calculating the agents who do not connect
+  B<-setdiff(A, connect_agent[[i]])
+  
+  # exclude the exiters
+  B<-B[!(B %in% exit[[i]])]
+  
+  # save
+  notconnect_agent[[i]]<-B
+  # print the process
+  print(i)
+}
+
+# probability of sales
+# we calculate the probability of sale for each agent for each year
+prob_sale<-data.frame(NA, NA, NA)
+colnames(prob_sale)<-c("Agent_ID","Year","Prob")
+
+# a loop through to calculate that
+for(i in 1:13)
+{
+  # list in that year
+  temp1<-X[X$list_year==year[i],]
+  # if close price is non-missing, then it was sold
+  temp1<-data.frame(temp1$lagent_id, temp1$close_price)
+  # for non-missing price, assign 1 and 0 o.w.
+  temp1$temp1.close_price[!is.na(temp1$temp1.close_price)]<-1
+  temp1$temp1.close_price[is.na(temp1$temp1.close_price)]<-0
+  # the probs
+  temp1<-aggregate(temp1$temp1.close_price~temp1$temp1.lagent_id, FUN=mean)
+  colnames(temp1)<-c("Agent_ID","Prob")
+  temp1$Year<-year[i]
+  # merge
+  prob_sale<-rbind(prob_sale, temp1)
+  # print the progress
+  print(i)
+}
+
+# remove the first obs
+prob_sale<-prob_sale[-1,]
+
+
+# in each disconnected group
+# we match them i.e. only include those having same number of transactions
+# as one of the agent in the connected group
+
+# loop through to clean it up
+for(i in 1:length(notconnect_agent))
+{
+# trans for connected group
+temp1<-trans[trans$Year==2000+i,]
+temp1<-temp1[temp1$Agent_ID %in% connect_agent[[i]],]
+# trans for disconnected group
+temp2<-trans[trans$Year==2000+i,]
+temp2<-temp2[temp2$Agent_ID %in% notconnect_agent[[i]],]
+
+# include those having same num of transactions
+temp2<-temp2[temp2$Num_Transactions %in% temp1$Num_Transactions,]
+
+# adding this cleaned group to the disconnected group
+notconnect_agent[[i]]<-temp2$Agent_ID
+
+# print process
+print(2000+i)
+}
+
+# then we do the same thing for mean transaction and prob of sales
+
+
+# for each year, I create the mean transactions for before exit and after exit
+
+# the year span
+year<-2001:2013
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+  # for connected group at that year
+  temp1<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  connect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # similarly for disconnected agents
+  temp1<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Num_Transactions~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  disconnect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # print the progress
+  print(i)
+}
+
+# for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+# add a group name
+M$Group<-"Connected Group"
+
+# for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M1<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M1)<-c("Event","Mean")
+# add a group name
+M1$Group<-"Disconnected Group"
+
+# combine two
+M<-rbind(M, M1)
+# restrict to -3 to 3
+M<-M[M$Event %in% c(-3:3),]
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0, 50))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+# similarly for probs
+
+# a matrix for (dis)connected group
+connect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+disconnect_trans_mat<-matrix(NA, nrow=length(connect_agent),ncol=length(year))
+
+# loop through year
+for(i in 1:length(year))
+{
+  # for connected group at that year
+  temp1<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  connect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # similarly for disconnected agents
+  temp1<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # the mean by year
+  temp1<-aggregate(temp1$Prob~temp1$Year, FUN=mean)
+  colnames(temp1)<-c("year","avg")
+  temp1<-temp1[temp1$year<=2013,]
+  # add to matrix
+  id_mat<-fmatch(temp1$year, year)
+  disconnect_trans_mat[i,id_mat]<-temp1$avg
+  
+  # print the progress
+  print(i)
+}
+
+
+# for connected group
+mydf<-data.frame(as.vector(t(connect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M)<-c("Event","Mean")
+# add a group name
+M$Group<-"Connected Group"
+
+# for disconnected group
+mydf<-data.frame(as.vector(t(disconnect_trans_mat)))
+colnames(mydf)<-c("Mean")
+# add event time
+event<-c(0:12,-1:11,-2:10,-3:9,-4:8,-5:7,-6:6,-7:5,-8:4,-9:3,-10:2,-11:1,-12:0)
+mydf$Event<-event
+# add group cat
+mydf$Group<-rep(2001:2013,each=13)
+# remove 2013
+mydf<-mydf[mydf$Group!=2013,]
+# group to character
+mydf$Group<-as.character(mydf$Group)
+
+# add a mean
+M1<-aggregate(mydf$Mean~mydf$Event, FUN=mean)
+colnames(M1)<-c("Event","Mean")
+# add a group name
+M1$Group<-"Disconnected Group"
+
+# combine two
+M<-rbind(M, M1)
+# restrict to -3 to 3
+M<-M[M$Event %in% c(-3:3),]
+
+# plot
+ggplot(M, aes(x=Event,y=Mean,group=Group,color=Group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0.35, 0.5))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+
+## Added on Oct 7, 2019
+
+# read transaction data
+setwd("/Users/terrywu/Dropbox/MLS Network/Superstar Task")
+trans<-read.csv("Transaction_by_Agent_Year.csv",stringsAsFactors = F)
+
+# calculate active dataset based on trans
+active<-acast(trans, Agent_ID~Year, value.var="Num_Transactions",fun.aggregate=sum)
+active[is.na(active)]<-0
+
+# year span
+year<-unique(trans$Year)
+year<-year[order(year)]
+
+# using 2-year def to create a list of exiting agents
+exit<-list()
+for(i in 1:(length(year)-2))
+{
+  temp<-active[active[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i]!=0,]
+  exit[[i]]<-rownames(temp)
+  print(i)
+}
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# read the original dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# for each year, we first compute the agents who connect to exiters
+connect_agent<-list()
+# loop through
+for(i in 1:length(exit))
+{
+  # for exiters acting as listers
+  temp1<-X[X$close_year==year[i],] 
+  temp1<-temp1[temp1$lagent_id %in% exit[[i]],]
+  # take the bagent out
+  b<-temp1$bagent_id
+  
+  # for exiters acting as buyers
+  temp1<-X[X$list_year==year[i],] 
+  temp1<-temp1[temp1$bagent_id %in% exit[[i]],]
+  # take the lagent out
+  b<-c(b,temp1$lagent_id)
+  
+  # include only unique agent
+  b<-b[b!=""]
+  b<-unique(b)
+  
+  # also we excude the exiters themselves
+  b<-b[!(b %in% exit[[i]])]
+  connect_agent[[i]]<-b
+  
+  # print the process
+  print(i)
+}
+
+# for each year, calculate the agents who do not connect to exiters
+notconnect_agent<-list()
+# loop through year
+for(i in 1:length(exit))
+{
+  # extracting all agents
+  A<-active[active[,i]>=1,]
+  A<-row.names(A)
+  A<-unique(A)
+  # calculating the agents who do not connect
+  B<-setdiff(A, connect_agent[[i]])
+  
+  # exclude the exiters
+  B<-B[!(B %in% exit[[i]])]
+  
+  # save
+  notconnect_agent[[i]]<-B
+  # print the process
+  print(i)
+}
+
+# probability of sales
+# we calculate the probability of sale for each agent for each year
+prob_sale<-data.frame(NA, NA, NA)
+colnames(prob_sale)<-c("Agent_ID","Year","Prob")
+
+# a loop through to calculate that
+for(i in 1:13)
+{
+  # list in that year
+  temp1<-X[X$list_year==year[i],]
+  # if close price is non-missing, then it was sold
+  temp1<-data.frame(temp1$lagent_id, temp1$close_price)
+  # for non-missing price, assign 1 and 0 o.w.
+  temp1$temp1.close_price[!is.na(temp1$temp1.close_price)]<-1
+  temp1$temp1.close_price[is.na(temp1$temp1.close_price)]<-0
+  # the probs
+  temp1<-aggregate(temp1$temp1.close_price~temp1$temp1.lagent_id, FUN=mean)
+  colnames(temp1)<-c("Agent_ID","Prob")
+  temp1$Year<-year[i]
+  # merge
+  prob_sale<-rbind(prob_sale, temp1)
+  # print the progress
+  print(i)
+}
+
+# remove the first obs
+prob_sale<-prob_sale[-1,]
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+# extract the trans for these agents
+temp<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+# add event time
+temp$event_time<-temp$Year-(2000+i)
+# restrict to -3 to 3
+temp<-temp[temp$event_time %in% c(-3:3),]
+# change column names
+colnames(temp)<-c("agent","year","num_trans","event_time")
+# merge
+treatment_trans<-rbind(treatment_trans, temp)
+# print the process
+print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+# extract the trans for these agents
+temp<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+# add event time
+temp$event_time<-temp$Year-(2000+i)
+# restrict to -3 to 3
+temp<-temp[temp$event_time %in% c(-3:3),]
+# change column names
+colnames(temp)<-c("agent","year","num_trans","event_time")
+# merge
+control_trans<-rbind(control_trans, temp)
+# print the process
+print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and group identity
+df<-aggregate(df$num_trans~df$group+df$event_time, FUN=mean)
+colnames(df)<-c("group","event_time","num")
+
+# plot
+ggplot(df, aes(x=event_time,y=num,group=group,color=group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0, 40))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+# similarly for probability of sales
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and group identity
+df<-aggregate(df$num_trans~df$group+df$event_time, FUN=mean)
+colnames(df)<-c("group","event_time","num")
+
+# plot
+ggplot(df, aes(x=event_time,y=num,group=group,color=group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0.3, 0.55))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+# then we plot conditional on event year
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA, NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and event year
+df<-aggregate(df$num_trans~df$group+df$event_time+df$event_year, FUN=mean)
+colnames(df)<-c("group","event_time","event_year","num")
+
+# plot by each year
+for(i in unique(df$event_year))
+{
+# subset
+df1<-df[df$event_year==i,]
+g<-ggplot(df1, aes(x=event_time,y=num,group=group,color=group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  expand_limits(x=c(-3:3))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0.3, 0.55))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+# save
+Name<-paste("Oct7_trans_year_",i,".pdf",sep="")
+ggsave(g, file=Name,width = 25, height = 20, units = "cm")
+# print the process
+print(i)
+}
+
+
+
+
+# then we plot conditional on event year
+# for prob of sales
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA, NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and event year
+df<-aggregate(df$num_trans~df$group+df$event_time+df$event_year, FUN=mean)
+colnames(df)<-c("group","event_time","event_year","num")
+
+# plot by each year
+for(i in unique(df$event_year))
+{
+  # subset
+  df1<-df[df$event_year==i,]
+  g<-ggplot(df1, aes(x=event_time,y=num,group=group,color=group))+
+    geom_line(size=2)+
+    theme_bw()+
+    ylab("Mean Prob of Sales by Event Time")+
+    xlab("Event Time")+
+    theme(axis.title.x = element_text(size = 25),
+          axis.title.y = element_text(size = 25))+
+    theme(axis.text.x = element_text(angle = 90))+
+    expand_limits(x=c(-3:3))+
+    scale_x_discrete(limits=c(-3:3))+
+    expand_limits(y = c(0.3, 0.55))+
+    theme(legend.title=element_blank())+
+    theme(text = element_text(size=25))+
+    theme(legend.position="bottom",
+          legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+    geom_vline(xintercept = 0,size=2)
+  # save
+  Name<-paste("Oct7_probs_year_",i,".pdf",sep="")
+  ggsave(g, file=Name,width = 25, height = 20, units = "cm")
+  # print the process
+  print(i)
+}
+
+
+
+## Added on Oct 8, 2019
+
+# the below
+
+# read transaction data
+setwd("/Users/terrywu/Dropbox/MLS Network/Superstar Task")
+trans<-read.csv("Transaction_by_Agent_Year.csv",stringsAsFactors = F)
+
+# exclude year 2013 and after
+trans<-trans[trans$Year<=2012,]
+
+# calculate active dataset based on trans
+active<-acast(trans, Agent_ID~Year, value.var="Num_Transactions",fun.aggregate=sum)
+active[is.na(active)]<-0
+
+# year span
+year<-unique(trans$Year)
+year<-year[order(year)]
+
+# using 2-year def to create a list of exiting agents
+exit<-list()
+for(i in 1:(length(year)-2))
+{
+  temp<-active[active[,i+1]==0,]
+  temp<-temp[temp[,i+2]==0,]
+  temp<-temp[temp[,i]!=0,]
+  exit[[i]]<-rownames(temp)
+  print(i)
+}
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# calcualte the treatment agents
+# suppose i exits in year t+1, and calculate the agents who connects her in year t
+# and those who did not in year t
+
+# read the original dataset
+setwd("/Users/terrywu/Dropbox/MLS Network")
+load("Michigan_Full.RData")
+
+# removed all "999999"
+X<-X[X$lagent_id!="999999",]
+X<-X[X$bagent_id!="999999",]
+
+# for each year, we first compute the agents who connect to exiters
+connect_agent<-list()
+# loop through
+for(i in 1:length(exit))
+{
+  # for exiters acting as listers
+  temp1<-X[X$close_year==year[i],] 
+  temp1<-temp1[temp1$lagent_id %in% exit[[i]],]
+  # take the bagent out
+  b<-temp1$bagent_id
+  
+  # for exiters acting as buyers
+  temp1<-X[X$list_year==year[i],] 
+  temp1<-temp1[temp1$bagent_id %in% exit[[i]],]
+  # take the lagent out
+  b<-c(b,temp1$lagent_id)
+  
+  # include only unique agent
+  b<-b[b!=""]
+  b<-unique(b)
+  
+  # also we excude the exiters themselves
+  b<-b[!(b %in% exit[[i]])]
+  connect_agent[[i]]<-b
+  
+  # print the process
+  print(i)
+}
+
+# for each year, calculate the agents who do not connect to exiters
+notconnect_agent<-list()
+# loop through year
+for(i in 1:length(exit))
+{
+  # extracting all agents
+  A<-active[active[,i]>=1,]
+  A<-row.names(A)
+  A<-unique(A)
+  # calculating the agents who do not connect
+  B<-setdiff(A, connect_agent[[i]])
+  
+  # exclude the exiters
+  B<-B[!(B %in% exit[[i]])]
+  
+  # save
+  notconnect_agent[[i]]<-B
+  # print the process
+  print(i)
+}
+
+# probability of sales
+# we calculate the probability of sale for each agent for each year
+prob_sale<-data.frame(NA, NA, NA)
+colnames(prob_sale)<-c("Agent_ID","Year","Prob")
+
+# a loop through to calculate that
+for(i in 1:12)
+{
+  # list in that year
+  temp1<-X[X$list_year==year[i],]
+  # if close price is non-missing, then it was sold
+  temp1<-data.frame(temp1$lagent_id, temp1$close_price)
+  # for non-missing price, assign 1 and 0 o.w.
+  temp1$temp1.close_price[!is.na(temp1$temp1.close_price)]<-1
+  temp1$temp1.close_price[is.na(temp1$temp1.close_price)]<-0
+  # the probs
+  temp1<-aggregate(temp1$temp1.close_price~temp1$temp1.lagent_id, FUN=mean)
+  colnames(temp1)<-c("Agent_ID","Prob")
+  temp1$Year<-year[i]
+  # merge
+  prob_sale<-rbind(prob_sale, temp1)
+  # print the progress
+  print(i)
+}
+
+# remove the first obs
+prob_sale<-prob_sale[-1,]
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time")
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and group identity
+df<-aggregate(df$num_trans~df$group+df$event_time, FUN=mean)
+colnames(df)<-c("group","event_time","num")
+
+# plot
+ggplot(df, aes(x=event_time,y=num,group=group,color=group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Transaction Counts by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0, 40))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+# similarly for probability of sales
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and group identity
+df<-aggregate(df$num_trans~df$group+df$event_time, FUN=mean)
+colnames(df)<-c("group","event_time","num")
+
+# plot
+ggplot(df, aes(x=event_time,y=num,group=group,color=group))+
+  geom_line(size=2)+
+  theme_bw()+
+  ylab("Mean Prob of Sales by Event Time")+
+  xlab("Event Time")+
+  theme(axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25))+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_x_discrete(limits=c(-3:3))+
+  expand_limits(y = c(0.3, 0.55))+
+  theme(legend.title=element_blank())+
+  theme(text = element_text(size=25))+
+  theme(legend.position="bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+  geom_vline(xintercept = 0,size=2)
+
+
+# then we plot conditional on event year
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA, NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-trans[trans$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and event year
+df<-aggregate(df$num_trans~df$group+df$event_time+df$event_year, FUN=mean)
+colnames(df)<-c("group","event_time","event_year","num")
+
+# plot by each year
+for(i in unique(df$event_year))
+{
+  # subset
+  df1<-df[df$event_year==i,]
+  g<-ggplot(df1, aes(x=event_time,y=num,group=group,color=group))+
+    geom_line(size=2)+
+    theme_bw()+
+    ylab("Mean Transaction Counts by Event Time")+
+    xlab("Event Time")+
+    theme(axis.title.x = element_text(size = 25),
+          axis.title.y = element_text(size = 25))+
+    theme(axis.text.x = element_text(angle = 90))+
+    expand_limits(x=c(-3:3))+
+    scale_x_discrete(limits=c(-3:3))+
+    expand_limits(y = c(0.3, 0.55))+
+    theme(legend.title=element_blank())+
+    theme(text = element_text(size=25))+
+    theme(legend.position="bottom",
+          legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+    geom_vline(xintercept = 0,size=2)
+  # save
+  Name<-paste("Oct7_trans_year_",i,"_pre2013.pdf",sep="")
+  ggsave(g, file=Name,width = 25, height = 20, units = "cm")
+  # print the process
+  print(i)
+}
+
+
+# then we plot conditional on event year
+# for prob of sales
+
+# we create a treatment dataset
+# such that it contains: agent, event time, year of transaction
+treatment_trans<-data.frame(NA, NA, NA,NA, NA)
+colnames(treatment_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all treatment year
+for(i in 1:length(connect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% connect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  treatment_trans<-rbind(treatment_trans, temp)
+  # print the process
+  print(2000+i)
+}
+treatment_trans<-treatment_trans[-1,]
+# add group name
+treatment_trans$group<-"Treatment"
+
+# we create a control dataset
+# such that it contains: agent, event time, year of transaction
+control_trans<-data.frame(NA, NA, NA,NA,NA)
+colnames(control_trans)<-c("agent","year","num_trans","event_time","event_year")
+# restrict to -3 to 3
+
+# loop through all control year
+for(i in 1:length(notconnect_agent))
+{
+  # extract the trans for these agents
+  temp<-prob_sale[prob_sale$Agent_ID %in% notconnect_agent[[i]],]
+  # add event time
+  temp$event_time<-temp$Year-(2000+i)
+  # restrict to -3 to 3
+  temp<-temp[temp$event_time %in% c(-3:3),]
+  # add event year
+  temp$event_year<-2000+i
+  # change column names
+  colnames(temp)<-c("agent","year","num_trans","event_time","event_year")
+  # merge
+  control_trans<-rbind(control_trans, temp)
+  # print the process
+  print(2000+i)
+}
+control_trans<-control_trans[-1,]
+# add group name
+control_trans$group<-"Control"
+
+# a data frame to plot
+df<-rbind(treatment_trans, control_trans)
+# average by event time and event year
+df<-aggregate(df$num_trans~df$group+df$event_time+df$event_year, FUN=mean)
+colnames(df)<-c("group","event_time","event_year","num")
+
+# plot by each year
+for(i in unique(df$event_year))
+{
+  # subset
+  df1<-df[df$event_year==i,]
+  g<-ggplot(df1, aes(x=event_time,y=num,group=group,color=group))+
+    geom_line(size=2)+
+    theme_bw()+
+    ylab("Mean Prob of Sales by Event Time")+
+    xlab("Event Time")+
+    theme(axis.title.x = element_text(size = 25),
+          axis.title.y = element_text(size = 25))+
+    theme(axis.text.x = element_text(angle = 90))+
+    expand_limits(x=c(-3:3))+
+    scale_x_discrete(limits=c(-3:3))+
+    expand_limits(y = c(0.3, 0.55))+
+    theme(legend.title=element_blank())+
+    theme(text = element_text(size=25))+
+    theme(legend.position="bottom",
+          legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill="gray90", size=.5, linetype="dotted"))+
+    geom_vline(xintercept = 0,size=2)
+  # save
+  Name<-paste("Oct7_probs_year_",i,"_pre2013.pdf",sep="")
+  ggsave(g, file=Name,width = 25, height = 20, units = "cm")
+  # print the process
+  print(i)
+}
+
